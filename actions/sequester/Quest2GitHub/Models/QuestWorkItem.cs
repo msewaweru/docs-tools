@@ -1,5 +1,6 @@
 ﻿using DotNet.DocsTools.GitHubObjects;
 using DotNet.DocsTools.Utility;
+using Microsoft.DotnetOrg.Ospo;
 
 namespace Quest2GitHub.Models;
 
@@ -123,14 +124,10 @@ public class QuestWorkItem
     /// Create a work item from a GitHub issue.
     /// </summary>
     /// <param name="issue">The GitHub issue.</param>
-    /// <param name="parentId">The ID of the parent ID</param>
     /// <param name="questClient">The quest client.</param>
     /// <param name="ospoClient">the MS open source programs office client.</param>
     /// <param name="path">The path component for the area path.</param>
-    /// <param name="currentIteration">The current AzDo iteration</param>
-    /// <param name="allIterations">The set of all iterations to search</param>
     /// <param name="requestLabelNodeId">The ID of the request label</param>
-    /// <param name="tagMap">The map of GH label to tags</param>
     /// <returns>The newly created linked Quest work item.</returns>
     /// <remarks>
     /// Fill in the Json patch document from the GitHub issue.
@@ -139,14 +136,11 @@ public class QuestWorkItem
     /// Json element.
     /// </remarks>
     public static async Task<QuestWorkItem> CreateWorkItemAsync(QuestIssueOrPullRequest issue,
-        int parentId,
         QuestClient questClient,
         OspoClient? ospoClient,
         string path,
         string? requestLabelNodeId,
-        QuestIteration currentIteration,
-        IEnumerable<QuestIteration> allIterations,
-        IEnumerable<LabelToTagMap> tagMap)
+        WorkItemProperties issueProperties)
     {
         string areaPath = $"""{questClient.QuestProject}\{path}""";
 
@@ -171,12 +165,12 @@ public class QuestWorkItem
                 Value = areaPath,
             }
         ];
-        if (parentId != 0)
+        if (issueProperties.ParentNodeId != 0)
         {
             var parentRelation = new Relation
             {
                 RelationName = "System.LinkTypes.Hierarchy-Reverse",
-                Url = $"https://dev.azure.com/{questClient.QuestOrg}/{questClient.QuestProject}/_apis/wit/workItems/{parentId}",
+                Url = $"https://dev.azure.com/{questClient.QuestOrg}/{questClient.QuestProject}/_apis/wit/workItems/{issueProperties.ParentNodeId}",
                 Attributes =
                 {
                     ["name"] = "Parent",
@@ -207,53 +201,36 @@ public class QuestWorkItem
             Value = assigneeID
         };
         patchDocument.Add(assignPatch);
-        StoryPointSize? iterationSize = issue.LatestStoryPointSize();
-        QuestIteration? iteration = iterationSize?.ProjectIteration(allIterations);
-        if (iterationSize != null)
-        {
-            Console.WriteLine($"Latest GitHub sprint project: {iterationSize?.Month}-{iterationSize?.CalendarYear}, size: {iterationSize?.Size}");
-            if (iterationSize?.IsPastIteration == true)
-            {
-                Console.WriteLine($"Moving to the backlog / future iteration.");
-                iteration = QuestIteration.FutureIteration(allIterations);
-            }
-        }
-        else
-        {
-            Console.WriteLine("No GitHub sprint project found - using current iteration");
-        }
         patchDocument.Add(new JsonPatchDocument
         {
             Operation = Op.Add,
             Path = "/fields/System.IterationPath",
-            Value = iteration?.Path ?? currentIteration.Path,
+            Value = issueProperties.IterationPath,
         });
-        if (iterationSize?.QuestStoryPoint() is not null)
+        if (issueProperties.StoryPoints != 0)
         {
             patchDocument.Add(new JsonPatchDocument
             {
                 Operation = Op.Add,
                 From = default,
                 Path = "/fields/Microsoft.VSTS.Scheduling.StoryPoints",
-                Value = iterationSize.QuestStoryPoint(),
+                Value = issueProperties.StoryPoints,
             });
         }
-        int? priority = issue.GetPriority(iterationSize);
-        if (priority.HasValue)
+        if (issueProperties.Priority != -1)
         {
             patchDocument.Add(new JsonPatchDocument
             {
                 Operation = Op.Add,
                 From = default,
                 Path = "/fields/Microsoft.VSTS.Common.Priority",
-                Value = priority
+                Value = issueProperties.Priority
             });
         }
 
-        var tags = issue.WorkItemTagsForIssue(tagMap);
-        if (tags.Any())
+        if (issueProperties.Tags.Any())
         {
-            string azDoTags = string.Join(";", tags);
+            string azDoTags = string.Join(";", issueProperties.Tags);
             patchDocument.Add(new JsonPatchDocument
             {
                 Operation = Op.Add,
@@ -273,24 +250,7 @@ public class QuestWorkItem
                 Value = creator ?? "dotnet-bot"
             });
         */
-        if (!issue.IsOpen)
-        {
-            // Created completed work item:
-            patchDocument.Add(new JsonPatchDocument
-            {
-                Operation = Op.Add,
-                Path = "/fields/System.State",
-                Value = "Closed",
-            });
-        } else 
-        {
-            patchDocument.Add(new JsonPatchDocument
-            {
-                Operation = Op.Add,
-                Path = "/fields/System.State",
-                Value = (iterationSize?.IsPastIteration == true) ? "New" : "Committed",
-            });
-        }
+
         JsonElement result = default;
         QuestWorkItem? newItem;
         try
@@ -310,11 +270,6 @@ public class QuestWorkItem
             // Yes, this could throw again. IF so, it's a new error.
             result = await questClient.CreateWorkItem(patchDocument);
             newItem = WorkItemFromJson(result);
-        }
-        // Add the closing PR in a separate request. 
-        if (issue.ClosingPRUrl is not null)
-        {
-            newItem = await newItem.AddClosingPR(questClient, issue.ClosingPRUrl) ?? newItem;
         }
         return newItem;
     }
@@ -383,7 +338,7 @@ public class QuestWorkItem
         try
         {
             JsonElement jsonDocument = await azdoClient.PatchWorkItem(Id, patchDocument);
-            var newItem = QuestWorkItem.WorkItemFromJson(jsonDocument);
+            var newItem = WorkItemFromJson(jsonDocument);
             s_linkedGitHubRepo = true;
             return newItem;
         }
@@ -397,6 +352,137 @@ public class QuestWorkItem
             s_linkedGitHubRepo = false;
             return null;
         }
+    }
+
+    static internal async Task<QuestWorkItem?> UpdateWorkItemAsync(QuestWorkItem questItem,
+        QuestIssueOrPullRequest ghIssue,
+        QuestClient questClient,
+        OspoClient? ospoClient,
+        WorkItemProperties issueProperties)
+    {
+        string? ghAssigneeEmailAddress = await ghIssue.QueryAssignedMicrosoftEmailAddressAsync(ospoClient);
+        AzDoIdentity? questAssigneeID = default;
+
+        if (ghAssigneeEmailAddress?.EndsWith("@microsoft.com") == true)
+        {
+            questAssigneeID = await questClient.GetIDFromEmail(ghAssigneeEmailAddress);
+        }
+        List<JsonPatchDocument> patchDocument = [];
+        if (issueProperties.ParentNodeId != questItem.ParentWorkItemId)
+        {
+            if (questItem.ParentWorkItemId != 0)
+            {
+                // Remove the existing parent relation.
+                patchDocument.Add(new JsonPatchDocument
+                {
+                    Operation = Op.Remove,
+                    Path = "/relations/" + questItem.ParentRelationIndex,
+                });
+            };
+            if (issueProperties.ParentNodeId != 0)
+            {
+                var parentRelation = new Relation
+                {
+                    RelationName = "System.LinkTypes.Hierarchy-Reverse",
+                    Url = $"https://dev.azure.com/{questClient.QuestOrg}/{questClient.QuestProject}/_apis/wit/workItems/{issueProperties.ParentNodeId}",
+                    Attributes =
+                    {
+                        ["name"] = "Parent",
+                        ["isLocked"] = false
+                    }
+                };
+
+                patchDocument.Add(new JsonPatchDocument
+                {
+                    Operation = Op.Add,
+                    Path = "/relations/-",
+                    From = default,
+                    Value = parentRelation
+                });
+            }
+        }
+        if ((questAssigneeID is not null) && (questAssigneeID?.Id != questItem.AssignedToId))
+        {
+            // build patch document for assignment.
+            JsonPatchDocument assignPatch = new()
+            {
+                Operation = Op.Add,
+                Path = "/fields/System.AssignedTo",
+                Value = questAssigneeID,
+            };
+            patchDocument.Add(assignPatch);
+        }
+        Console.WriteLine(issueProperties.IssueLogString);
+        if (issueProperties.WorkItemState != questItem.State)
+        {
+            patchDocument.Add(new JsonPatchDocument
+            {
+                Operation = Op.Add,
+                Path = "/fields/System.State",
+                Value = issueProperties.WorkItemState,
+            });
+        }
+        if (issueProperties.IterationPath != questItem.IterationPath)
+        {
+            patchDocument.Add(new JsonPatchDocument
+            {
+                Operation = Op.Add,
+                Path = "/fields/System.IterationPath",
+                Value = issueProperties.IterationPath,
+            });
+        }
+        if (issueProperties.StoryPoints != (questItem.StoryPoints ?? 0))
+        {
+            patchDocument.Add(new JsonPatchDocument
+            {
+                Operation = Op.Add,
+                From = default,
+                Path = "/fields/Microsoft.VSTS.Scheduling.StoryPoints",
+                Value = issueProperties.StoryPoints,
+            });
+        }
+        if (issueProperties.Priority != questItem.Priority)
+        {
+            patchDocument.Add(new JsonPatchDocument
+            {
+                Operation = Op.Add,
+                Path = "/fields/Microsoft.VSTS.Common.Priority",
+                Value = (issueProperties.Priority == -1) ? 4 : issueProperties.Priority
+            });
+        }
+        var tags = from t in issueProperties.Tags
+                   where !questItem.Tags.Contains(t)
+                   select t;
+        if (tags.Any())
+        {
+            string azDoTags = string.Join(";", tags);
+            patchDocument.Add(new JsonPatchDocument
+            {
+                Operation = Op.Add,
+                Path = "/fields/System.Tags",
+                Value = azDoTags
+            });
+        }
+
+        QuestWorkItem? newItem = default;
+        if (patchDocument.Count != 0)
+        {
+            // If any updates are needed, add the description.
+            patchDocument.Add(new JsonPatchDocument
+            {
+                Operation = Op.Add,
+                Path = "/fields/System.Description",
+                From = default,
+                Value = BuildDescriptionFromIssue(ghIssue, null)
+            });
+            JsonElement jsonDocument = await questClient.PatchWorkItem(questItem.Id, patchDocument);
+            newItem = WorkItemFromJson(jsonDocument);
+        }
+        if (!ghIssue.IsOpen && (ghIssue.ClosingPRUrl is not null))
+        {
+            newItem = await questItem.AddClosingPR(questClient, ghIssue.ClosingPRUrl) ?? newItem;
+        }
+        return newItem;
     }
 
     /// <summary>

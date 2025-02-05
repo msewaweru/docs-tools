@@ -1,6 +1,6 @@
 ﻿namespace Quest2GitHub.Options;
 
-public record struct ParentForLabel(string Label, int ParentNodeId);
+public record struct ParentForLabel(string? Label, string? Semester, int ParentNodeId);
 
 public record struct LabelToTagMap(string Label, string Tag);
 
@@ -57,15 +57,6 @@ public sealed record class ImportOptions
     /// ordered. The first label found on an issue will be used for the parent.
     /// </remarks>
     public List<ParentForLabel> ParentNodes { get; init; } = [];
-
-    /// <summary>
-    /// The default parent node for any quest item.
-    /// </summary>
-    /// <remarks>
-    /// If an issue doesn't match any of the configured labels
-    /// the default parent node is set for the work item.
-    /// </remarks>
-    public int DefaultParentNode { get; init; }
 
     /// <summary>
     /// A map of GitHub labels to Azure DevOps tags.

@@ -12,7 +12,7 @@ namespace CleanRepo;
 class DocFxRepo(string startDirectory, string urlBasePath)
 {
     internal string UrlBasePath { get; set; } = urlBasePath;
-    public DirectoryInfo? DocFxDirectory { get; private set; } = Program.GetDirectory(new DirectoryInfo(startDirectory), "docfx.json");
+    public DirectoryInfo? DocFxDirectory { get; private set; } = HelperMethods.GetDirectory(new DirectoryInfo(startDirectory), "docfx.json");
 
     internal Dictionary<string, List<string>>? _imageRefs = null;
     internal Dictionary<string, string>? _ocrRefs = null;
@@ -27,17 +27,18 @@ class DocFxRepo(string startDirectory, string urlBasePath)
         "lightbox\\s*=\\s*\"(?<path>.*?(\\.(png|gif|jpg|svg))+)\"", // lightbox="media/azure.png"
         ":::image [^:]*?source\\s*=\\s*\"(?<path>.*?(\\.(png|gif|jpg|svg))+)(\\?[\\w\\s=\\.]+)?\\s*\"", // :::image type="content" source="media/publish.png?text=Publish dialog." alt-text="Publish dialog.":::
         "<a href=\"(?<path>[^\"]*?(\\.(png|gif|jpg|svg))+)\"", // <a href="./media/job-large.png" target="_blank"><img src="./media/job-small.png"></a>
-        "\\((?<path>[^\\)]*?(\\.(png|jpg|gif|svg)))+(#lightbox)\\s*\\)" // (./media/functions-scenarios/process-file-uploads-expanded.png#lightbox)
+        "\\]\\((?<path>[^\\)]*?(\\.(png|jpg|gif|svg)))+(#lightbox)[\\s|\\)]" //](../images/alignment-expansion-large.png#lightbox)
     ];
     private List<FileInfo>? _allMdAndYmlFiles;
     private List<FileInfo>? AllMdAndYmlFiles
     {
         get
         {
+            DirectoryInfo? rootDirectory = null;
             if (_allMdAndYmlFiles == null)
             {
-                _allMdAndYmlFiles = Program.GetAllMarkdownFiles(DocFxDirectory!.FullName, out _);
-                List<FileInfo>? yamlFiles = Program.GetAllYamlFiles(DocFxDirectory!.FullName, out _);
+                _allMdAndYmlFiles = HelperMethods.GetAllReferencingFiles("*.md", DocFxDirectory!.FullName, ref rootDirectory);
+                List<FileInfo>? yamlFiles = HelperMethods.GetAllReferencingFiles("*.yml", DocFxDirectory!.FullName, ref rootDirectory);
                 if (yamlFiles is not null)
                     _allMdAndYmlFiles?.AddRange(yamlFiles);
             }
@@ -66,7 +67,7 @@ class DocFxRepo(string startDirectory, string urlBasePath)
         get
         {
             if (_opsConfigFile == null)
-                _opsConfigFile = Program.GetFileHereOrInParent(DocFxDirectory!.FullName, ".openpublishing.publish.config.json");
+                _opsConfigFile = HelperMethods.GetFileHereOrInParent(DocFxDirectory!.FullName, ".openpublishing.publish.config.json");
 
             if (_opsConfigFile == null)
                 throw new InvalidOperationException($"Could not find OPS config file for the {DocFxDirectory!.FullName} directory.");
